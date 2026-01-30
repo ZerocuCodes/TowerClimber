@@ -1,0 +1,792 @@
+// ==UserScript==
+// @name         Tower Climber Assistant
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  An assistant for the Tower game on Stake.us, Stake.com, and Shuffle.com
+// @author       Zerocu
+// @match        https://shuffle.com/games/originals/tower
+// @match        https://stake.com/casino/games/dragon-tower
+// @match        https://stake.ac/casino/games/dragon-tower
+// @match        https://stake.games/casino/games/dragon-tower
+// @match        https://stake.bet/casino/games/dragon-tower
+// @match        https://stake.pet/casino/games/dragon-tower
+// @match        https://stake.mba/casino/games/dragon-tower
+// @match        https://stake.jp/casino/games/dragon-tower
+// @match        https://stake.bz/casino/games/dragon-tower
+// @match        https://stake.ceo/casino/games/dragon-tower
+// @match        https://stake.krd/casino/games/dragon-tower
+// @match        https://staketr.com/casino/games/dragon-tower
+// @match        https://stake1001.com/casino/games/dragon-tower
+// @match        https://stake1002.com/casino/games/dragon-tower
+// @match        https://stake1003.com/casino/games/dragon-tower
+// @match        https://stake1021.com/casino/games/dragon-tower
+// @match        https://stake1022.com/casino/games/dragon-tower
+// @match        https://stake1017.com/casino/games/dragon-tower
+// @match        https://stake.us/casino/games/dragon-tower
+// @match        https://stake.br/casino/games/dragon-tower
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const PLATFORMS = {
+        stake: {
+            betButton: '[data-testid="bet-button"]',
+            randomTileButton: '[data-test-dragon-tower-random-tile="true"], [data-testid="dragon-tower-random-tile"]',
+            cashoutButton: '[data-testid="cashout-button"]',
+            balance: 'span[data-testid="balance"]',
+            betAmount: '[data-testid="input-game-amount"]',
+            profitInput: '[data-testid="profit-input"]',
+            gameBoard: '.dragon-tower-board, [data-testid="dragon-tower-board"], .game-board'
+        },
+        shuffle: {
+            betButton: '[data-testid="bet-button"]',
+            randomTileButton: 'button[value="Pick Random Brick"]',
+            cashoutButton: '[data-testid="cash-out"]',
+            balance: 'span[data-testid="balance"]',
+            betAmount: '[data-testid="bet-amount"]'
+        }
+    };
+
+    const GameState = {
+        IDLE: 'idle',
+        BETTING: 'betting',
+        PLAYING: 'playing',
+    };
+
+    let config = {
+        platform: 'stake',
+        targetLevel: 3,
+        autoCashOut: true,
+        isRunning: false,
+        delay: 50,
+        minDelay: 10,
+        maxDelay: 1000,
+    };
+
+    let gameState = {
+        status: GameState.IDLE,
+        currentLevel: 0,
+        sessionProfit: 0,
+        isPicking: false,
+        previousBalance: 0,
+        currency: '',
+        gameStarted: false,
+        totalGames: 0,
+        wonGames: 0,
+    };
+
+    function query(selectorKey) {
+        const selector = PLATFORMS[config.platform][selectorKey];
+        if (!selector) return null;
+        return document.querySelector(selector);
+    }
+
+    function clickElement(selectorKey) {
+        const element = query(selectorKey);
+        if (element && !element.disabled) {
+            element.click();
+            return true;
+        }
+        return false;
+    }
+
+    function detectGameState() {
+        const betButton = query('betButton');
+        const cashoutButton = query('cashoutButton');
+        const randomTileButton = query('randomTileButton');
+
+        // For Stake platforms specifically
+        if (config.platform === 'stake') {
+            if (cashoutButton && !cashoutButton.disabled) {
+                return GameState.PLAYING;
+            }
+
+            if (randomTileButton && !randomTileButton.disabled) {
+                return GameState.PLAYING;
+            }
+
+            if (betButton) {
+                const buttonText = betButton.textContent?.trim().toLowerCase();
+                const isDisabled = betButton.disabled;
+
+                if ((buttonText === 'bet' || buttonText === 'play') && !isDisabled) {
+                    return GameState.IDLE;
+                }
+
+                if (isDisabled) {
+                    return GameState.BETTING;
+                }
+            }
+        } else if (config.platform === 'shuffle') {
+            // Shuffle-specific game state detection
+            if (cashoutButton && !cashoutButton.disabled) {
+                return GameState.PLAYING;
+            }
+
+            if (randomTileButton && !randomTileButton.disabled) {
+                return GameState.PLAYING;
+            }
+
+            if (betButton && !betButton.disabled) {
+                const buttonText = betButton.textContent?.trim().toLowerCase();
+                if (buttonText === 'bet') {
+                    return GameState.IDLE;
+                }
+            }
+        }
+
+        return GameState.BETTING;
+    }
+
+    function gameLoop() {
+        if (!config.isRunning) {
+            updateStatusIndicator(GameState.IDLE);
+            gameState.gameStarted = false;
+            return;
+        }
+
+        const currentState = detectGameState();
+        updateStatusIndicator(currentState);
+
+        switch (currentState) {
+            case GameState.IDLE:
+                gameState.gameStarted = false;
+                placeBet();
+                break;
+            case GameState.PLAYING:
+                if (!gameState.gameStarted) {
+                    logMessage('Game detected as active!', 'success');
+                    gameState.gameStarted = true;
+                    gameState.currentLevel = 0;
+                }
+                handleGameplay();
+                break;
+            case GameState.BETTING:
+                logMessage('Waiting for bet to process...', 'info');
+                setTimeout(gameLoop, 50);
+                break;
+        }
+    }
+
+    function placeBet() {
+        if (config.platform === 'shuffle') {
+            const balanceInfo = getShuffleBalance();
+            gameState.previousBalance = balanceInfo.amount;
+            gameState.currency = balanceInfo.currency;
+        }
+
+        if (clickElement('betButton')) {
+            logMessage('Bet placed successfully! Waiting for game to start...', 'success');
+            gameState.currentLevel = 0;
+            gameState.gameStarted = false;
+            updateStats();
+            setTimeout(() => {
+                if (config.isRunning) {
+                    checkForPlayingState();
+                }
+            }, 250);
+        } else {
+            logMessage('Could not place bet. Button might not be ready.', 'error');
+            setTimeout(gameLoop, 250);
+        }
+    }
+
+    function checkForPlayingState() {
+        if (!config.isRunning) return;
+
+        let attempts = 0;
+        const maxAttempts = 20;
+        const checkInterval = 75;
+
+        const poll = setInterval(() => {
+            if (!config.isRunning) {
+                clearInterval(poll);
+                return;
+            }
+
+            const currentState = detectGameState();
+            attempts++;
+
+            if (attempts % 3 === 0 || attempts >= maxAttempts - 2) {
+                logMessage(`Checking for active game: ${currentState} (${attempts}/${maxAttempts})`, 'info');
+            }
+
+            if (currentState === GameState.PLAYING) {
+                clearInterval(poll);
+                logMessage('Game is now active!', 'success');
+                gameState.gameStarted = true;
+                setTimeout(gameLoop, 50);
+            } else if (attempts >= maxAttempts) {
+                clearInterval(poll);
+                logMessage('Game did not start within expected time. Retrying...', 'error');
+                setTimeout(gameLoop, 50);
+            }
+        }, checkInterval);
+    }
+
+    function handleGameplay() {
+        if (gameState.isPicking) {
+            logMessage('Waiting for pick to register...', 'info');
+            return;
+        }
+
+        // Check if we've reached target level
+        if (gameState.currentLevel >= config.targetLevel) {
+            if (config.autoCashOut) {
+                logMessage(`Target level ${config.targetLevel} reached! Cashing out.`, 'success');
+                cashOut();
+            } else {
+                logMessage('Target reached. Pausing for manual cashout.', 'info');
+                toggleAutoPlay();
+            }
+            return;
+        }
+
+        const randomTileButton = query('randomTileButton');
+        if (!randomTileButton) {
+            logMessage('Random tile button not found. Game may have ended.', 'error');
+            setTimeout(gameLoop, 100);
+            return;
+        }
+
+        if (randomTileButton.disabled) {
+            logMessage('Random tile button disabled. Waiting...', 'info');
+            setTimeout(gameLoop, config.delay);
+            return;
+        }
+
+        logMessage(`Picking random tile at level ${gameState.currentLevel + 1}...`, 'info');
+        if (clickElement('randomTileButton')) {
+            gameState.isPicking = true;
+            gameState.currentLevel++;
+            updateStats();
+
+            // Wait for the result
+            setTimeout(() => {
+                checkTileResult();
+            }, Math.max(config.delay, 75));
+        } else {
+            logMessage('Failed to click random tile button.', 'error');
+            setTimeout(gameLoop, config.delay);
+        }
+    }
+
+    function checkTileResult() {
+        if (!config.isRunning) return;
+
+        const currentState = detectGameState();
+
+        if (currentState === GameState.IDLE) {
+            // Game ended - hit a trap
+            logMessage('Hit a trap! Game over.', 'error');
+            gameState.totalGames++;
+            gameState.isPicking = false;
+
+            // Update profit for both platforms
+            setTimeout(() => {
+                if (config.platform === 'shuffle') {
+                    const newBalance = getShuffleBalance();
+                    const profit = newBalance.amount - gameState.previousBalance;
+                    gameState.sessionProfit += profit;
+                } else if (config.platform === 'stake') {
+                    const newBalance = getStakeBalance();
+                    const profit = newBalance.amount - gameState.previousBalance;
+                    gameState.sessionProfit += profit;
+                }
+                updateProfitDisplay();
+            }, 500);
+
+            setTimeout(gameLoop, 1500);
+        } else if (currentState === GameState.PLAYING) {
+            // Successfully picked a safe tile
+            logMessage(`Level ${gameState.currentLevel} completed!`, 'success');
+            gameState.isPicking = false;
+            setTimeout(gameLoop, config.delay);
+        } else {
+            // Still processing, check again
+            setTimeout(checkTileResult, 300);
+        }
+    }
+
+    function cashOut() {
+        const cashoutButton = query('cashoutButton');
+
+        if (!cashoutButton) {
+            logMessage('Cashout button not found. Checking game state...', 'error');
+            const currentState = detectGameState();
+            if (currentState === GameState.IDLE) {
+                logMessage('Game ended - continuing to next game.', 'info');
+                gameState.gameStarted = false;
+                setTimeout(gameLoop, 1500);
+            } else {
+                setTimeout(() => cashOut(), 1000);
+            }
+            return;
+        }
+
+        if (cashoutButton.disabled) {
+            logMessage('Cashout button disabled. Waiting...', 'info');
+            setTimeout(() => cashOut(), 1000);
+            return;
+        }
+
+        if (clickElement('cashoutButton')) {
+            logMessage(`Cashed out successfully at level ${gameState.currentLevel}!`, 'success');
+            gameState.totalGames++;
+            gameState.wonGames++;
+            gameState.gameStarted = false;
+
+            // Update profit for both platforms
+            setTimeout(() => {
+                if (config.platform === 'shuffle') {
+                    const newBalance = getShuffleBalance();
+                    const profit = newBalance.amount - gameState.previousBalance;
+                    gameState.sessionProfit += profit;
+                } else if (config.platform === 'stake') {
+                    const newBalance = getStakeBalance();
+                    const profit = newBalance.amount - gameState.previousBalance;
+                    gameState.sessionProfit += profit;
+                }
+                updateProfitDisplay();
+            }, 500);
+
+            setTimeout(gameLoop, 2000);
+        } else {
+            logMessage('Failed to click cashout button.', 'error');
+            setTimeout(() => cashOut(), 1000);
+        }
+    }
+
+    function getShuffleBalance() {
+        try {
+            const balanceElement = query('balance');
+            if (!balanceElement) return { currency: null, amount: 0 };
+            const cleanedText = balanceElement.innerHTML.replace(/&nbsp;/g, ' ').trim();
+            const match = cleanedText.match(/^([A-Za-z]+)?\s*(\d+(\.\d+)?)$/);
+            if (!match) return { currency: null, amount: 0 };
+            return { currency: match[1] || '', amount: parseFloat(match[2]) || 0 };
+        } catch (e) {
+            return { currency: null, amount: 0 };
+        }
+    }
+
+    function getStakeBalance() {
+        try {
+            const coinToggle = document.querySelector('[data-testid="coin-toggle"]');
+            if (!coinToggle) return { currency: null, amount: 0 };
+
+            // Get currency from data attribute
+            const currency = coinToggle.getAttribute('data-active-currency') || '';
+
+            // Find the balance amount - look for the numeric span
+            const numericSpan = coinToggle.querySelector('.weight-semibold.numeric');
+            if (!numericSpan) return { currency: currency, amount: 0 };
+
+            let balanceText = numericSpan.textContent.trim();
+
+            // Handle different formats: "0.92", "$0.00", etc.
+            const match = balanceText.match(/[\d,]+\.?\d*/);
+            if (!match) return { currency: currency, amount: 0 };
+
+            const amount = parseFloat(match[0].replace(/,/g, '')) || 0;
+
+            return { currency: currency, amount: amount };
+        } catch (e) {
+            console.error('Error getting Stake balance:', e);
+            return { currency: null, amount: 0 };
+        }
+    }
+
+    function injectStyles() {
+        const styleSheet = document.createElement("style");
+        styleSheet.textContent = `
+
+.address-container {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+.donation-label {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+            #tower-assistant {
+                position: fixed; top: 20px; right: 20px;
+                background: linear-gradient(145deg, #1f2937, #111827);
+                padding: 20px; border-radius: 12px; z-index: 9999; width: 320px;
+                color: #f0f2f5;
+                font-family: 'Inter', Arial, sans-serif;
+                box-shadow: 0 8px 30px rgba(0,0,0,0.7), inset 0 1px 1px rgba(255, 255, 255, 0.05);
+                border: 1px solid #374151;
+            }
+            #tower-header {
+                display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 20px; cursor: move; padding-bottom: 10px;
+                border-bottom: 1px solid #374151;
+                text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+            }
+            .status-indicator {
+                width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; display: inline-block;
+                border: 1px solid rgba(0,0,0,0.5);
+                box-shadow: 0 0 6px 1px currentColor;
+            }
+            .status-idle { color: #6b7280; background-color: #6b7280; }
+            .status-betting { color: #d97706; background-color: #d97706; }
+            .status-playing { color: #10b981; background-color: #10b981; }
+
+            .control-button {
+                padding: 9px 18px; border-radius: 6px; font-weight: 600; cursor: pointer;
+                transition: all 0.2s ease-in-out;
+                border: 1px solid rgba(0,0,0,0.6);
+                text-shadow: 0 -1px 1px rgba(0,0,0,0.4);
+                box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1), 0 2px 3px rgba(0,0,0,0.5);
+            }
+            .button-start {
+                background: linear-gradient(to bottom, #1e40af, #0f3460);
+                color: white;
+            }
+            .button-start:hover {
+                background: linear-gradient(to bottom, #2563eb, #1d4ed8);
+                box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15), 0 2px 3px rgba(0,0,0,0.5), 0 0 12px #2563eb;
+            }
+            .button-stop {
+                background: linear-gradient(to bottom, #991b1b, #7f1d1d);
+                color: white;
+            }
+            .button-stop:hover {
+                background: linear-gradient(to bottom, #b91c1c, #991b1b);
+                box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15), 0 2px 3px rgba(0,0,0,0.5), 0 0 12px #b91c1c;
+            }
+
+            .settings-section, .donation-section {
+                margin: 15px 0; padding: 15px;
+                background: rgba(0,0,0,0.3);
+                border-radius: 8px;
+                border: 1px solid #111827;
+                box-shadow: inset 0 2px 6px rgba(0,0,0,0.5);
+            }
+            .stat-box {
+                background: linear-gradient(145deg, #374151, #1f2937);
+                padding: 10px; border-radius: 8px; text-align: center;
+                border: 1px solid #4b5563;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+            }
+            .stat-label { font-size: 12px; color: #9ca3af; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+            .stat-value { font-size: 16px; font-weight: bold; color: #ffffff; text-shadow: 0 0 5px rgba(255,255,255,0.2); }
+            .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
+            .profit-positive { color: #10b981; }
+            .profit-negative { color: #ef4444; }
+            #game-log {
+                margin-top: 15px; max-height: 100px; overflow-y: auto; font-size: 12px;
+                padding: 10px; background: #000;
+                border-radius: 6px;
+                box-shadow: inset 0 2px 4px rgba(0,0,0,0.6);
+                border: 1px solid #374151;
+                color: #9ca3af;
+            }
+            .log-info { color: #3b82f6; }
+            .log-success { color: #10b981; }
+            .log-error { color: #ef4444; }
+
+            .platform-selector {
+                width: 100%; padding: 8px;
+                background: #111827;
+                color: #f0f2f5;
+                border: 1px solid #4b5563;
+                border-radius: 4px; margin-top: 10px;
+                box-shadow: inset 0 1px 3px rgba(0,0,0,0.6);
+            }
+
+            input[type="range"] {
+                -webkit-appearance: none;
+                width: 100%; height: 6px;
+                background: #111827;
+                border-radius: 3px;
+                outline: none;
+                box-shadow: inset 0 1px 2px rgba(0,0,0,0.6);
+            }
+            input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 20px; height: 20px; border-radius: 50%;
+                background: #1d4ed8;
+                cursor: pointer; border: 2px solid #f0f2f5;
+                box-shadow: 0 0 10px #2563eb, 0 1px 3px rgba(0,0,0,0.5);
+                transition: box-shadow 0.2s;
+            }
+            input[type="range"]::-webkit-slider-thumb:hover {
+                box-shadow: 0 0 15px #3b82f6, 0 1px 3px rgba(0,0,0,0.5);
+            }
+
+            input[type="checkbox"] {
+                -webkit-appearance: none; appearance: none;
+                width: 18px; height: 18px;
+                border: 1px solid #4b5563;
+                border-radius: 4px; background-color: #1f2937;
+                cursor: pointer; vertical-align: middle; margin-right: 8px;
+                position: relative; top: -1px;
+                transition: all 0.2s;
+            }
+            input[type="checkbox"]:checked {
+                background-color: #1d4ed8;
+                border-color: #2563eb;
+                box-shadow: 0 0 8px #2563eb;
+            }
+            input[type="checkbox"]:checked::after {
+                content: '✓'; font-size: 14px; color: white;
+                position: absolute; top: 50%; left: 50%;
+                transform: translate(-50%, -50%);
+                text-shadow: 0 0 3px rgba(0,0,0,0.6);
+            }
+
+            #xrp-address {
+                width: 100%;
+                padding: 8px;
+                background: #111827;
+                color: #f0f2f5;
+                border: 1px solid #4b5563;
+                border-radius: 4px;
+                margin-top: 10px;
+                box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
+            }
+
+        #copy-xrp-button {
+            background: linear-gradient(to bottom, #374151, #1f2937);
+            color: #d1d5db; border: 1px solid #4b5563; padding: 6px 12px; border-radius: 4px;
+            cursor: pointer; font-weight: 600;
+            transition: all 0.2s;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+            margin-top: 10px;
+        }
+
+        #copy-xrp-button:hover {
+            border-color: #3b82f6;
+            color: white;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 8px #3b82f6;
+        }
+        `;
+        document.head.appendChild(styleSheet);
+    }
+
+    function createControlPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'tower-assistant';
+        panel.innerHTML = `
+        <div id="tower-header">
+                <div style="display: flex; align-items: center;">
+                    <span class="status-indicator status-idle"></span>
+                    <h3 style="margin: 0; font-size: 16px;">Tower Assistant</h3>
+                </div>
+                <button id="start-stop" class="control-button button-start">Start</button>
+            </div>
+            <div class="settings-section">
+                <div>
+                    <label for="platform-select">Active Platform:</label>
+                    <select id="platform-select" class="platform-selector">
+                        <option value="stake">Stake (.com / .us)</option>
+                        <option value="shuffle">Shuffle</option>
+                    </select>
+                </div>
+                <hr style="border-color: #555; margin: 15px 0;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <label>Target Level</label>
+                    <span id="target-level-display">${config.targetLevel}</span>
+                </div>
+                <input type="range" id="target-level" min="1" max="10" value="${config.targetLevel}" style="width: 100%;">
+                <div style="margin-top: 15px;">
+                    <label>Bot Speed: <span id="speed-display">${config.delay}ms</span></label>
+                    <input type="range" id="speed-control" min="${config.minDelay}" max="${config.maxDelay}" value="${config.delay}" style="width: 100%;">
+                    <div style="font-size: 11px; color: #aaa; margin-top: 5px;">
+                        Faster ← → Slower (${config.minDelay}ms - ${config.maxDelay}ms)
+                    </div>
+                </div>
+                <div>
+                    <input type="checkbox" id="auto-cashout" ${config.autoCashOut ? 'checked' : ''}>
+                    <label for="auto-cashout">Auto Cash Out</label>
+                </div>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-label">Current Level</div>
+                    <div class="stat-value" id="current-level">0</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Win Rate</div>
+                    <div class="stat-value" id="win-rate">0%</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Session Profit</div>
+                    <div class="stat-value" id="session-profit">0.00</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Total Games</div>
+                    <div class="stat-value" id="total-games">0</div>
+                </div>
+            </div>
+            <div id="game-log"></div>
+            <div class="donation-section">
+                <div class="donation-label">Enjoying the script? Donations are appreciated! XRP Address</div>
+                <div class="address-container">
+                    <input type="text" id="xrp-address" value="rzerQXq1nrGakfA9DYcMDVsoAF3KPK6e1" readonly>
+                    <button id="copy-xrp-button">Copy</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(panel);
+        makeDraggable(panel);
+        initializeEventListeners();
+    }
+
+    function makeDraggable(panel) {
+        const header = panel.querySelector('#tower-header');
+        let isDragging = false, xOffset = 0, yOffset = 0;
+        header.addEventListener('mousedown', e => {
+            isDragging = true;
+            xOffset = e.clientX - panel.getBoundingClientRect().left;
+            yOffset = e.clientY - panel.getBoundingClientRect().top;
+            panel.style.cursor = 'grabbing';
+        });
+        document.addEventListener('mousemove', e => {
+            if (isDragging) {
+                panel.style.left = `${e.clientX - xOffset}px`;
+                panel.style.top = `${e.clientY - yOffset}px`;
+            }
+        });
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+            panel.style.cursor = 'default';
+        });
+    }
+
+    function logMessage(message, type = 'info') {
+        const gameLog = document.getElementById('game-log');
+        if (!gameLog) return;
+        const entry = document.createElement('div');
+        entry.className = `log-entry log-${type}`;
+        entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        gameLog.insertBefore(entry, gameLog.firstChild);
+        if (gameLog.children.length > 50) gameLog.removeChild(gameLog.lastChild);
+    }
+
+    function updateStats() {
+        const currentLevelEl = document.getElementById('current-level');
+        if (currentLevelEl) currentLevelEl.textContent = gameState.currentLevel;
+
+        const winRate = gameState.totalGames > 0
+            ? ((gameState.wonGames / gameState.totalGames) * 100).toFixed(1)
+            : '0.0';
+        const winRateEl = document.getElementById('win-rate');
+        if (winRateEl) winRateEl.textContent = winRate + '%';
+
+        const totalGamesEl = document.getElementById('total-games');
+        if (totalGamesEl) totalGamesEl.textContent = gameState.totalGames;
+
+        updateProfitDisplay();
+    }
+
+    function updateProfitDisplay() {
+        const profitEl = document.getElementById('session-profit');
+        if (!profitEl) return;
+        profitEl.textContent = `${gameState.currency} ${gameState.sessionProfit.toFixed(4)}`;
+        profitEl.className = `stat-value ${gameState.sessionProfit >= 0 ? 'profit-positive' : 'profit-negative'}`;
+    }
+
+    function updateStatusIndicator(status) {
+        const indicator = document.querySelector('.status-indicator');
+        if (indicator) {
+            indicator.className = 'status-indicator status-' + status;
+            gameState.status = status;
+        }
+    }
+
+    function toggleAutoPlay() {
+        config.isRunning = !config.isRunning;
+        const button = document.getElementById('start-stop');
+        button.textContent = config.isRunning ? 'Stop' : 'Start';
+        button.className = `control-button ${config.isRunning ? 'button-stop' : 'button-start'}`;
+        if (config.isRunning) {
+            logMessage('Bot started', 'success');
+            gameLoop();
+        } else {
+            logMessage('Bot stopped', 'info');
+        }
+    }
+
+    function initializeEventListeners() {
+        document.getElementById('start-stop').addEventListener('click', toggleAutoPlay);
+        document.getElementById('platform-select').addEventListener('change', e => {
+            config.platform = e.target.value;
+            logMessage(`Platform switched to: ${config.platform}`, 'info');
+        });
+        document.getElementById('target-level').addEventListener('input', e => {
+            config.targetLevel = parseInt(e.target.value);
+            document.getElementById('target-level-display').textContent = config.targetLevel;
+        });
+        document.getElementById('speed-control').addEventListener('input', e => {
+            config.delay = parseInt(e.target.value);
+            document.getElementById('speed-display').textContent = `${config.delay}ms`;
+        });
+        document.getElementById('auto-cashout').addEventListener('change', e => {
+            config.autoCashOut = e.target.checked;
+        });
+        document.getElementById('copy-xrp-button').addEventListener('click', (e) => {
+            const addressInput = document.getElementById('xrp-address');
+            const button = e.target;
+            navigator.clipboard.writeText(addressInput.value).then(() => {
+                logMessage('XRP address copied to clipboard!', 'success');
+                const originalText = button.textContent;
+                button.textContent = 'Copied!';
+                setTimeout(() => {
+                    button.textContent = originalText;
+                }, 2000);
+            }).catch(err => {
+                logMessage('Failed to copy address.', 'error');
+                console.error('Failed to copy address: ', err);
+            });
+        });
+    }
+
+    function detectPlatform() {
+        const hostname = window.location.hostname.toLowerCase();
+
+        if (hostname.includes('shuffle')) return 'shuffle';
+
+        const stakeDomains = [
+            'stake.com', 'stake.us', 'stake.ac', 'stake.games', 'stake.bet',
+            'stake.pet', 'stake.mba', 'stake.jp', 'stake.bz', 'stake.ceo',
+            'stake.krd', 'stake.br', 'staketr.com', 'stake1001.com',
+            'stake1002.com', 'stake1003.com', 'stake1021.com', 'stake1022.com',
+            'stake1017.com'
+        ];
+
+        if (stakeDomains.includes(hostname)) return 'stake';
+        if (hostname.includes('stake')) return 'stake';
+        return 'stake';
+    }
+
+    function init() {
+        config.platform = detectPlatform();
+        const betButtonSelector = PLATFORMS[config.platform].betButton;
+
+        const readyCheck = setInterval(() => {
+            if (document.querySelector(betButtonSelector)) {
+                clearInterval(readyCheck);
+                injectStyles();
+                createControlPanel();
+                const platformSelect = document.getElementById('platform-select');
+                if (platformSelect) platformSelect.value = config.platform;
+                logMessage(`Tower Assistant initialized on ${config.platform}!`, 'success');
+            }
+        }, 500);
+    }
+
+    init();
+
+})();
